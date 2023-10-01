@@ -1,6 +1,13 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.calculate = void 0;
+exports.calculate = exports.NoConvergenceError = void 0;
+class NoConvergenceError extends Error {
+    constructor(message) {
+        super(message);
+        this.name = "NoConvergenceError";
+    }
+}
+exports.NoConvergenceError = NoConvergenceError;
 const getJulianDate = (date) => {
     // https://www5d.biglobe.ne.jp/~noocyte/Programming/GregorianAndJulianCalendars.html
     const d = date instanceof Date ? date.getTime() : date;
@@ -26,7 +33,6 @@ const getEclipticObliquity = (jd) => {
 };
 const getSunEquatorialPosition = (longitude, obliquity) => {
     // 日の出・日の入りの計算 天体の出没時刻の求め方 長沢工著 ISBN4-8052-0634-9
-    // 太陽高度kを0に固定
     let alpha = Math.atan(Math.tan(longitude) * Math.cos(obliquity));
     const delta = Math.asin(Math.sin(longitude) * Math.sin(obliquity));
     if (Math.sin(longitude) > 0) {
@@ -40,13 +46,69 @@ const getSunEquatorialPosition = (longitude, obliquity) => {
     // radians
     return [alpha, delta];
 };
-const getLatitude = (longitude, alpha, delta, gmst) => {
+const falsePositionMethod = (f, edges, options) => {
+    const { eps, maxIter } = Object.assign({ eps: 1e-10, maxIter: 1000 }, options);
+    let c = edges[0];
+    let count = 0;
+    let a = Math.min(...edges);
+    let b = Math.max(...edges);
+    while (count++ < maxIter) {
+        const fa = f(a);
+        const fb = f(b);
+        c = (a * fb - b * fa) / (fb - fa);
+        const fc = f(c);
+        if (Math.abs(fc) < eps)
+            break;
+        if (fa * fc < 0) {
+            b = c;
+        }
+        if (fa * fc > 0) {
+            a = c;
+        }
+    }
+    if (count >= maxIter)
+        throw new NoConvergenceError();
+    return c;
+};
+const getLatitude = (longitude, alpha, delta, gmst, elevation, options) => {
+    // 日の出・日の入りの計算 天体の出没時刻の求め方 長沢工著 ISBN4-8052-0634-9
+    // 太陽高度kを0に固定
     const hourAngle = (gmst * 15 * Math.PI / 180 + longitude) - alpha;
-    // radians
-    return Math.atan(-Math.cos(hourAngle) / Math.tan(delta));
+    if (elevation === 0) {
+        // radians
+        return Math.atan(-Math.cos(hourAngle) / Math.tan(delta));
+    }
+    const lat = falsePositionMethod((x) => {
+        return Math.sin(delta) * Math.sin(x) + Math.cos(delta) * Math.cos(x) * Math.cos(hourAngle) - Math.sin(elevation);
+    }, [-Math.PI / 2, Math.PI / 2], options);
+    if (lat < -Math.PI / 2)
+        return -Math.PI / 2;
+    if (Math.PI / 2 < lat)
+        return Math.PI / 2;
+    return lat;
+};
+const getTwilight = (t) => {
+    switch (t) {
+        case "civil": {
+            return -6 * Math.PI / 180;
+        }
+        case "nautical": {
+            return -12 * Math.PI / 180;
+        }
+        case "astronomical": {
+            return -18 * Math.PI / 180;
+        }
+        default: {
+            return 0;
+        }
+    }
 };
 const calculate = (options) => {
-    const { date, division } = Object.assign({ date: new Date(), division: 360 }, options);
+    const { date, division, elevationDegree } = Object.assign({ date: new Date(), division: 360, elevationDegree: 0 }, options);
+    const elevation = typeof elevationDegree === "string" ? getTwilight(elevationDegree) :
+        elevationDegree * Math.PI / 180;
+    if (Math.PI / 4 < Math.abs(elevation))
+        throw new RangeError();
     const jd = getJulianDate(date);
     const gmst = getGreenwichMeanSiderealTime(jd);
     const sunEclipticLongitude = getSunEclipticLongitude(jd);
@@ -55,16 +117,16 @@ const calculate = (options) => {
     const longlats = [];
     const diffDeg = 360 / division;
     for (let longitude = -180; longitude < 180; longitude += diffDeg) {
-        const latitude = getLatitude(longitude * Math.PI / 180, alpha, delta, gmst);
+        const latitude = getLatitude(longitude * Math.PI / 180, alpha, delta, gmst, elevation);
         longlats.push([longitude, latitude * 180 / Math.PI]);
     }
-    const latitude = getLatitude(Math.PI, alpha, delta, gmst);
+    const latitude = getLatitude(Math.PI, alpha, delta, gmst, elevation);
     longlats.push([180, latitude * 180 / Math.PI]);
     if (delta > 0) {
         longlats.push([180, -90]);
         longlats.push([-180, -90]);
         longlats.push(longlats[0]);
-        longlats.reverse();
+        longlats.reverse(); // right-hand rule
     }
     else {
         longlats.push([180, 90]);
